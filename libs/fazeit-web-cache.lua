@@ -38,7 +38,6 @@ return function(req, res, go)
 	-- Check if cache contains data for this etag
 	local req_etag = req.headers.ETag
 	if cache[req_etag] then
-		-- TODO Check validator for changes
 		res.code = 304 -- Not Modified
 		res.headers = clone(cache[req_etag].headers)
 		return

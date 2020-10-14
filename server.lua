@@ -3,6 +3,19 @@ local static = require('weblit-static')
 local pathJoin = require('luvi').path.join
 local json = require('json')
 local fs = require('fs')
+local log = require('pretty-print')
+log.loadColors(16)
+--[[
+	ANSI color escape codes
+
+	31 - red
+	32 - green
+	94 - bright blue
+	30 - black
+	93 - yellow
+	97 - white
+	
+]]
 
 local file = fs.readFileSync("config.json")
 local config = json.parse(file, 1, nil)
@@ -31,16 +44,13 @@ local app = weblit.app
 
 if config.redirectHttps then
 	app.use(require('weblit-force-https'))
-	print("Https redirect\t\tEnabled")
+	log.print("Https redirect\t\t\27[32mEnabled\27[0m")
 else
-	print("Https redirect\t\tDisabled")
+	log.print("Https redirect\t\t\27[31mDisabled\27[0m")
 end
 
-	-- This cache does not work for dynamic sites..... for get it exists
-	--.use(require('fazeit-web-cache'))
-	-- We're missing Last-Modified here so might need to reimplement static page loading
 
-	app.route({
+app.route({
 		method = "GET",
 		path = "/profile/:username"
 	}, function(req, res, go)
@@ -58,8 +68,13 @@ end
 		res.headers["Content-Type"] = "text/html"
 	end)
 
+if config.staticFiles then
 	-- For debugging purposes, use fallback static page parser
-	.use(static(pathJoin(module.dir, "static")))
+	app.use(static(pathJoin(module.dir, config.staticRoot or "static")))
+	print("Serve static files\t\27[32mEnabled\27[0m")
+else
+	print("Serve static files\t\27[31mDisabled\27[0m")
+end
 
-	-- Start the server
-	.start()
+-- Start the server
+app.start()

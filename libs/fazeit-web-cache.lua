@@ -32,6 +32,7 @@ local shasum = require("sha1")
 -- Expires header may be used for fallback caches
 -- 
 
+-- Will not work for dynamic sites!! need a custom solution
 
 local cache = {}
 return function(req, res, go)

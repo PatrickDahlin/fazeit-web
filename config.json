@@ -1,3 +1,5 @@
 {
-	"redirectHttps" : true
+	"redirectHttps" : true,
+	"staticFiles" : true,
+	"staticRoot" : "static"
 }

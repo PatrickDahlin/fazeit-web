@@ -1,5 +1,12 @@
 {
-	"redirectHttps" : true,
 	"staticFiles" : true,
-	"staticRoot" : "static"
+	"host" : "127.0.0.1",
+	"staticRoot" : "static",
+	"tls" : {
+		"port" : 443,
+		"enabled" : true,
+		"httpRedirect" : true,
+		"certificate" : "faze_dev.crt",
+		"key" : "faze-key.pem"
+	}
 }

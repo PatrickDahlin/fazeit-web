@@ -4,6 +4,9 @@ local pathJoin = require('luvi').path.join
 local json = require('json')
 local fs = require('fs')
 local log = require('pretty-print')
+
+local a = require("fazeit-web-static")
+
 log.loadColors(16)
 --[[
 	ANSI color escape codes
@@ -27,46 +30,23 @@ local app = weblit.app
 		host = "127.0.0.1", 
 		port = 80
 	})
-
-	-- https
-	.bind({
-		host = "127.0.0.1",
-		port = 443,
-		tls = {
-			cert = module:load("faze_dev.crt"),
-    		key = module:load("faze-key.pem")
-		}
-	})
-
-	-- Configure weblit server
-	.use(weblit.logger)
-	.use(weblit.autoHeaders)
-
-if config.redirectHttps then
-	app.use(require('weblit-force-https'))
-	log.print("Https redirect\t\t\27[32mEnabled\27[0m")
-else
-	log.print("Https redirect\t\t\27[31mDisabled\27[0m")
+	
+if config.tls ~= nil then
+	require("fazeit-web-https")(app, config)
 end
 
+app.use(function(req, res, go)
+	print("--- RESPONSE BEGIN --- ")
+	print((req.path or req.params.path) .. " - " .. req.method)
+	go()
+end)
 
-app.route({
-		method = "GET",
-		path = "/profile/:username"
-	}, function(req, res, go)
-		res.code = 200
-		res.body = "<h2>Profile for "..req.params.username..".</h2>"
-		res.headers["Content-Type"] = "text/html"
-	end)
 
-	.route({
-		method = "GET",
-		path = "/mypath/index"
-	}, function(req, res, go)
-		res.code = 200
-		res.body = "<h1>Hello sailor from route-table!</h1>"
-		res.headers["Content-Type"] = "text/html"
-	end)
+-- Custom static file provider
+if config.staticFiles then
+	app.use(a("static"))
+end
+
 
 if config.staticFiles then
 	-- For debugging purposes, use fallback static page parser
@@ -75,6 +55,7 @@ if config.staticFiles then
 else
 	print("Serve static files\t\27[31mDisabled\27[0m")
 end
+
 
 -- Start the server
 app.start()

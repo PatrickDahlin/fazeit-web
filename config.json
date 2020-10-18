@@ -8,5 +8,6 @@
 		"httpRedirect" : true,
 		"certificate" : "faze_dev.crt",
 		"key" : "faze-key.pem"
-	}
+	},
+	"enableXHTML" : false
 }

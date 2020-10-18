@@ -6,7 +6,7 @@ local pprint = require("pretty-print").prettyPrint
 
 
 
-return function (hostPath)
+return function (hostPath, xhtml_enabled)
 	
 	local folder = fs2.stat(hostPath)
 	assert(folder ~= nil)
@@ -32,7 +32,12 @@ return function (hostPath)
 			local m_time = os.date("!%a, %d %m %Y %H:%M:%S GMT",lastm_time.sec)
 			local req_last_mod = req.headers["If-Modified-Since"]
 			
-			res.headers["Content-Type"] = mime.getType(path)
+			local mimetype = mime.getType(path)
+			if xhtml_enabled and mimetype == "text/html" then
+				mimetype = "application/xhtml+xml"
+			end
+			res.headers["Content-Type"] = mimetype
+
 			res.headers["Content-Length"] = len
 			res.headers["Cache-Control"] = "must-revalidate"--"no-cache, max-age=0"
 			res.headers["Last-Modified"] = m_time

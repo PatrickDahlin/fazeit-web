@@ -36,6 +36,7 @@ if config.tls ~= nil then
 end
 
 app.use(function(req, res, go)
+	res.headers["Connection"] = "close"
 	print("--- RESPONSE BEGIN --- ")
 	print((req.path or req.params.path) .. " - " .. req.method)
 	go()
@@ -44,18 +45,17 @@ end)
 
 -- Custom static file provider
 if config.staticFiles then
-	app.use(a("static"))
+	app.use(a("static", config.enableXHTML or false))
 end
 
 
 if config.staticFiles then
 	-- For debugging purposes, use fallback static page parser
-	app.use(static(pathJoin(module.dir, config.staticRoot or "static")))
+	--app.use(static(pathJoin(module.dir, config.staticRoot or "static")))
 	print("Serve static files\t\27[32mEnabled\27[0m")
 else
 	print("Serve static files\t\27[31mDisabled\27[0m")
 end
-
 
 -- Start the server
 app.start()

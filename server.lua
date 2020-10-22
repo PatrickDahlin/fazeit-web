@@ -43,6 +43,47 @@ app.use(function(req, res, go)
 end)
 
 
+
+local auth = require 'webauthn'
+
+app.route({
+	method = "GET",
+	path = "/authentication/creationOptions"
+},function(req, res, go)
+	res.code = 200
+	res.headers["Content-Type"] = "text/json"
+	-- generate public key credentialoptions
+	res.body = json.stringify( auth.generatePublicKeyCredentialRequestOptions() )
+	return
+end)
+
+app.route({
+	method = "GET",
+	path = "/authentication/requestOptions"
+},function(req, res, go)
+	res.code = 200
+	res.headers["Content-Type"] = "text/json"
+	-- generate public key credential requestoptions
+	res.body = json.stringify({ hello = "sailor" })
+	return
+end)
+
+
+app.route({
+	method = "POST"
+	path = "/authentication/register"
+}, function(req, res, go)
+
+	local reg = auth.registerKey(req.body.pkc, req.cookies.userId)
+	res.code = reg.status
+	res.body = reg.text
+
+	return
+end)
+
+
+
+
 -- Custom static file provider
 if config.staticFiles then
 	app.use(a("static", config.enableXHTML or false))
@@ -56,6 +97,9 @@ if config.staticFiles then
 else
 	print("Serve static files\t\27[31mDisabled\27[0m")
 end
+
+
+
 
 -- Start the server
 app.start()

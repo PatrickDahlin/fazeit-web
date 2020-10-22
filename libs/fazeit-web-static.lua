@@ -48,12 +48,14 @@ return function (hostPath, xhtml_enabled)
 				res.body = nil
 				return
 			end
-
+			local start = os.time()
 			local data = fs.readFile(hostPath.."/"..path)
 			--pprint(m_time)
 			res.code = 200
 			res.body = data
 			res.headers["ETag"] = sha1(data)
+			local endtime = os.time() - start
+			res.headers["Server-Timing"] = "fs, read;dur="..endtime
 			print("200 -> file body")
 			return
 			--print("File size: "..(status.size or "n/a"))

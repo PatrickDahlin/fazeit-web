@@ -1,6 +1,11 @@
 
 local json = require 'json'
 local sha = require 'sha2'
+local base64 = require 'base64'
+local CBOR = require 'CBOR'
+
+
+cache = {}
 
 local function generateChallenge()
 	local chars = "1234567890qwertzuiopasdfghjklyxcvbnm"
@@ -9,11 +14,11 @@ local function generateChallenge()
 		local charnum = math.random(string.len(chars))
 		output = output .. string.sub(chars, charnum, charnum+1)
 	end
+	cache[output] = false
 	return output
 end
 
 local function generateKeyOptions()
-
 	return {
 		challenge = generateChallenge(),
 		rp = {
@@ -49,7 +54,6 @@ local function generateKeyOptions()
 	}
 end
 
-cache = {}
 
 local function registerKey(keycred, userId)
 
@@ -70,7 +74,7 @@ local function registerKey(keycred, userId)
 	cache[clientData.challenge] = true
 
 	-- Check origin, this needs to be dynamic
-	if clientData.origin ~= "faze.dev" then
+	if string.find(clientData.origin, "faze.dev") == nil then
 		return { status = 403, text = "Invalid origin" }
 	end
 
@@ -79,8 +83,10 @@ local function registerKey(keycred, userId)
 	end
 
 	local clientDataHash = sha.sha256(keycred.clientDataJSON)
-	
+	local attestationtext = base64.decode(keycred.attestationObject)
 
+	--print(CBOR.decode(attestationtext))
+	
 	return {
 		status = 403,
 		text = "hehe"

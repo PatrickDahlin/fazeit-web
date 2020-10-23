@@ -42,6 +42,7 @@ app.use(function(req, res, go)
 	go()
 end)
 
+app.use(require 'fazeit-web-cookies')
 
 
 local auth = require 'webauthn'
@@ -70,11 +71,11 @@ end)
 
 
 app.route({
-	method = "POST"
+	method = "POST",
 	path = "/authentication/register"
 }, function(req, res, go)
 
-	local reg = auth.registerKey(req.body.pkc, req.cookies.userId)
+	local reg = auth.registerKey(json.parse(req.body,1,nil).pkc, req.cookies.userId)
 	res.code = reg.status
 	res.body = reg.text
 

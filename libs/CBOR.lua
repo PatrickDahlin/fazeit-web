@@ -1,1474 +1,916 @@
--- https://github.com/spc476/CBOR
+-- lua-ConciseSerialization License
+-- --------------------------------
+--
+-- lua-ConciseSerialization is licensed under the terms of the MIT/X11 license reproduced below.
+--
+-- ===============================================================================
+--
+-- Copyright (C) 2016-2019 Francois Perrad.
+--
+-- Permission is hereby granted, free of charge, to any person obtaining a copy
+-- of this software and associated documentation files (the "Software"), to deal
+-- in the Software without restriction, including without limitation the rights
+-- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-- copies of the Software, and to permit persons to whom the Software is
+-- furnished to do so, subject to the following conditions:
+--
+-- The above copyright notice and this permission notice shall be included in
+-- all copies or substantial portions of the Software.
+--
+-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+-- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+-- THE SOFTWARE.
+--
+-- ===============================================================================
+--
+-- (end of COPYRIGHT)
 
 
--- ***************************************************************
 --
--- Copyright 2016 by Sean Conner.  All Rights Reserved.
+-- lua-ConciseSerialization : <https://fperrad.frama.io/lua-ConciseSerialization/>
 --
--- This library is free software; you can redistribute it and/or modify it
--- under the terms of the GNU Lesser General Public License as published by
--- the Free Software Foundation; either version 3 of the License, or (at your
--- option) any later version.
---
--- This library is distributed in the hope that it will be useful, but
--- WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
--- or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
--- License for more details.
---
--- You should have received a copy of the GNU Lesser General Public License
--- along with this library; if not, see <http://www.gnu.org/licenses/>.
---
--- Comments, questions and criticisms can be sent to: sean@conman.org
---
--- ====================================================================
---
--- Module:      cbor
---
--- Desc:        Decodes CBOR data.
---
--- Types:
---              cbor (enum)
---                      *** base types
---                      * UINT          unsigned integer (Lua number)
---                      * NINT          negative integer (Lua number)
---                      * BIN           binary string   (Lua string)
---                      * TEXT          UTF-8 string    (Lua string)
---                      * ARRAY         value is item count (Lua number)
---                      * MAP           value is item count (Lua number)
---                      *** simple types
---                      * SIMPLE        SEE NOTES       (Lua number)
---                      * false         false value     (Lua false)
---                      * true          true value      (Lua true)
---                      * null          NULL value      (Lua nil)
---                      * undefined     undefined value (Lua nil)
---                      * half          half precicion   IEEE 754 float
---                      * single        single precision IEEE 754 float
---                      * double        double precision IEEE 754 float
---                      * __break       SEE NOTES
---                      *** tagged types
---                      * TAG_*         unsupported tag type (Lua number)
---                      * _datetime     datetime (TEXT)
---                      * _epoch        see cbor.isnumber()
---                      * _pbignum      positive bignum (BIN)
---                      * _nbignum      negative bignum (BIN)
---                      * _decimalfraction ARRAY(integer exp, integer mantissa)
---                      * _bigfloat     ARRAY(float exp,integer mantissa)
---                      * _tobase64url  should be base64url encoded (BIN)
---                      * _tobase64     should be base64 encoded (BIN)
---                      * _tobase16     should be base16 encoded (BIN)
---                      * _cbor         CBOR encoded data (BIN)
---                      * _url          URL (TEXT)
---                      * _base64url    base64url encoded data (TEXT)
---                      * _base64       base64 encoded data (TEXT)
---                      * _regex        regex (TEXT)
---                      * _mime         MIME encoded messsage (TEXT)
---                      * _magic_cbor   itself (no data, used to self-describe CBOR data)
---                      ** more tagged types, extensions
---                      * _nthstring    shared string
---                      * _perlobj      Perl serialized object
---                      * _serialobj    Generic serialized object
---                      * _shareable    sharable resource (ARRAY or MAP)
---                      * _sharedref    reference (UINT)
---                      * _rational     Rational number
---                      * _uuid         UUID value (BIN)
---                      * _language     Language-tagged string
---                      * _id           Identifier
---                      * _stringref    string reference
---                      * _bmime        Binary MIME message
---                      * _decimalfractionexp like _decimalfraction, non-int exponent
---                      * _bigfloatexp  like _bigfloat, non-int exponent
---                      * _indirection  Indirection
---                      * _rains        RAINS message
---                      * _ipaddress    IP address (or MAC address)
---                      *** Lua CBOR library types
---                      * __error       error parsing (TEXT)
---              data (any) decoded CBOR data
---              pos (integer) position parsing stopped
---
--- NOTES:       The simple type is returned for non-defined simple types.
---
---              The __break type is used to indicate the end of an
---              indefinite array or map.
---
--- luacheck: globals isnumber isinteger isfloat decode encode pdecode pencode
--- luacheck: globals TYPE TAG SIMPLE _VERSION __ENCODE_MAP _ENV
--- luacheck: globals null undefined
--- luacheck: ignore 611
--- ********************************************************************
 
-local math     = require "math"
-local string   = require "string"
-local table    = require "table"
-local lpeg     = require "lpeg"
-local cbor_c   = require "org.conman.cbor_c"
+local r, jit = pcall(require, 'jit')
+if not r then
+    jit = nil
+end
 
-local LUA_VERSION  = _VERSION
-local error        = error
-local pcall        = pcall
-local assert       = assert
-local getmetatable = getmetatable
+local SIZEOF_NUMBER = string.pack and #string.pack('n', 0.0) or 8
+local maxinteger
+local mininteger
+if not jit and _VERSION < 'Lua 5.3' then
+    -- Lua 5.1 & 5.2
+    local loadstring = loadstring or load
+    local luac = string.dump(loadstring "a = 1")
+    local header = { luac:byte(1, 12) }
+    SIZEOF_NUMBER = header[11]
+end
+
+local assert = assert
+local error = error
+local pairs = pairs
+local pcall = pcall
 local setmetatable = setmetatable
-local pairs        = pairs
-local ipairs       = ipairs
-local type         = type
-local tonumber     = tonumber
+local tostring = tostring
+local type = type
+local char = require'string'.char
+local format = require'string'.format
+local floor = require'math'.floor
+local frexp = require'math'.frexp or require'mathx'.frexp
+local ldexp = require'math'.ldexp or require'mathx'.ldexp
+local huge = require'math'.huge
+local tconcat = require'table'.concat
+local utf8_len = utf8 and utf8.len
 
-if LUA_VERSION < "Lua 5.3" then
-  function math.type(n)
-    return n >= -9007199254740992
-       and n <=  9007199254740992
-       and n % 1 == 0
-       and 'integer'
-       or  'float'
-  end
+local _ENV = nil
+local m = {}
+
+--[[ debug only
+local function hexadump (s)
+    return (s:gsub('.', function (c) return format('%02X ', c:byte()) end))
+end
+m.hexadump = hexadump
+--]]
+
+local function argerror (caller, narg, extramsg)
+    error("bad argument #" .. tostring(narg) .. " to "
+          .. caller .. " (" .. extramsg .. ")")
 end
 
-if LUA_VERSION == "Lua 5.1" then
-  module "org.conman.cbor" -- luacheck: ignore
-else
-  _ENV = {} -- luacheck: ignore
+local function typeerror (caller, narg, arg, tname)
+    argerror(caller, narg, tname .. " expected, got " .. type(arg))
 end
 
-_VERSION = cbor_c._VERSION
-
--- ***********************************************************************
--- UTF-8 defintion from RFC-3629.  There's a deviation from the RFC
--- specification in that I only allow certain codes from the US-ASCII C0
--- range (control codes) that are in common use.
--- ***********************************************************************
-
-local UTF8 = (
-                 lpeg.R("\7\13"," ~")
-               + lpeg.R("\194\223") * lpeg.R("\128\191")
-               + lpeg.P("\224")     * lpeg.R("\160\191") * lpeg.R("\128\191")
-               + lpeg.R("\225\236") * lpeg.R("\128\191") * lpeg.R("\128\191")
-               + lpeg.P("\237")     * lpeg.R("\128\159") * lpeg.R("\128\191")
-               + lpeg.R("\238\239") * lpeg.R("\128\191") * lpeg.R("\128\191")
-               + lpeg.P("\240")     * lpeg.R("\144\191") * lpeg.R("\128\191") * lpeg.R("\128\191")
-               + lpeg.R("\241\243") * lpeg.R("\128\191") * lpeg.R("\128\191") * lpeg.R("\128\191")
-               + lpeg.P("\224")     * lpeg.R("\128\142") * lpeg.R("\128\191") * lpeg.R("\128\191")
-             )^0
-             
--- ***********************************************************************
-
-local function throw(pos,...)
-  error( { pos = pos , msg = string.format(...) } , 2)
-end
-
--- ***********************************************************************
--- Usage:       bool = cbor.isnumber(ctype)
--- Desc:        returns true of the given CBOR type is a number
--- Input:       type (enum/cbor) CBOR type
--- Return:      bool (boolean) true if number, false otherwise
--- ***********************************************************************
-
-function isnumber(ctype)
-  return ctype == 'UINT'
-      or ctype == 'NINT'
-      or ctype == 'half'
-      or ctype == 'single'
-      or ctype == 'double'
-end
-
--- ***********************************************************************
--- Usage:       bool = cbor.isinteger(ctype)
--- Desc:        returns true if the given CBOR type is an integer
--- Input:       ctype (enum/cbor) CBOR type
--- Return:      bool (boolean) true if number, false othersise
--- ***********************************************************************
-
-function isinteger(ctype)
-  return ctype == 'UINT'
-      or ctype == 'NINT'
-end
-
--- ***********************************************************************
--- Usage:       bool = cbor.isfloat(ctype)
--- Desc:        returns true if the given CBOR type is a float
--- Input:       ctype (enum/cbor) CBOR type
--- Return:      bool (boolean) true if number, false otherwise
--- ***********************************************************************
-
-function isfloat(ctype)
-  return ctype == 'half'
-      or ctype == 'single'
-      or ctype == 'double'
-end
-
--- ***********************************************************************
--- usage:       len = mstrlen(ref)
--- desc:        This function returns the minimum length a string should
---              have to find its reference (see notes)
--- input:       ref (table) reference table
--- return:      len (integer) minimum string length for reference
---
--- note:        via http://cbor.schmorp.de/stringref
--- ***********************************************************************
-
-local function mstrlen(ref)
-  if #ref < 24 then
-    return 3
-  elseif #ref < 256 then
-    return 4
-  elseif #ref < 65536 then
-    return 5
-  elseif #ref < 4294967296 then
-    return 7
-  else
-    return 11
-  end
-end
-
--- ***********************************************************************
--- usage:       value2,pos2,ctype2 = decbintext(packet,pos,info,value,conv,ref,ctype)
--- desc:        Decode a CBOR BIN or CBOR TEXT into a Lua string
--- input:       packet (binary) binary blob
---              pos (integer) byte position in packet
---              info (integer) CBOR info value (0..31)
---              value (integer) string length
---              conv (table) conversion routines (passed to decode())
---              ref (table) reference table
---              ctype (enum/cbor) 'BIN' or 'TEXT'
--- return:      value2 (string) string from packet
---              pos2 (integer) position past string just extracted
---              ctype2 (enum/cbor) 'BIN' or 'TEXT'
--- ***********************************************************************
-
-local function decbintext(packet,pos,info,value,conv,ref,ctype)
-
-  -- ----------------------------------------------------------------------
-  -- Support for _stringref and _nthstring tags [1].  Strings shorter than
-  -- the reference mark will NOT be encoded, so these strings will not have
-  -- a reference upon decoding.
-  --
-  -- [1] http://cbor.schmorp.de/stringref
-  -- ----------------------------------------------------------------------
-  
-  if info < 31 then
-    local data = packet:sub(pos,pos + value - 1)
-    
-    -- --------------------------------------------------
-    -- make sure the string is long enough to reference
-    -- --------------------------------------------------
-    
-    if not ref._stringref[data] then
-      if #data >= mstrlen(ref._stringref) then
-        table.insert(ref._stringref,{ ctype = ctype , value = data })
-        ref._stringref[data] = true
-      end
+local function checktype (caller, narg, arg, tname)
+    if type(arg) ~= tname then
+        typeerror(caller, narg, arg, tname)
     end
-    return data,pos + value,ctype
-    
-  else
-    local acc = {}
-    local t,nvalue
-    
+end
+
+local function checkunsigned (caller, narg, arg)
+    if type(arg) ~= 'number' or arg < 0 or floor(arg) ~= arg then
+        typeerror(caller, narg, arg, 'positive integer')
+    end
+end
+
+local function pack_half_float(n)
+    local sign = 0
+    if n < 0.0 then
+        sign = 0x80
+        n = -n
+    end
+    local mant, expo = frexp(n)
+    if mant ~= mant then
+        return char(0x7E, 0x00)         -- nan
+    elseif mant == huge or expo > 0x10 then
+        if sign == 0 then
+            return char(0x7C, 0x00)     -- inf
+        else
+            return char(0xFC, 0x00)     -- -inf
+        end
+    elseif (mant == 0.0 and expo == 0) or expo < -0x0E then
+        return char(sign, 0x00)         -- zero
+    else
+        expo = expo + 0x0E
+        mant = floor((mant * 2.0 - 1.0) * ldexp(0.5, 11))
+        return char(sign + expo * 0x04 + floor(mant / 0x100),
+                    mant % 0x100)
+    end
+end
+
+local function pack_single_float(n)
+    local sign = 0
+    if n < 0.0 then
+        sign = 0x80
+        n = -n
+    end
+    local mant, expo = frexp(n)
+    if mant ~= mant then
+        return char(0xFF, 0x88, 0x00, 0x00)     -- nan
+    elseif mant == huge or expo > 0x80 then
+        if sign == 0 then
+            return char(0x7F, 0x80, 0x00, 0x00) -- inf
+        else
+            return char(0xFF, 0x80, 0x00, 0x00) -- -inf
+        end
+    elseif (mant == 0.0 and expo == 0) or expo < -0x7E then
+        return char(sign, 0x00, 0x00, 0x00)     -- zero
+    else
+        expo = expo + 0x7E
+        mant = floor((mant * 2.0 - 1.0) * ldexp(0.5, 24))
+        return char(sign + floor(expo / 0x2),
+                    (expo % 0x2) * 0x80 + floor(mant / 0x10000),
+                    floor(mant / 0x100) % 0x100,
+                    mant % 0x100)
+    end
+end
+
+local function pack_double_float(n)
+    local sign = 0
+    if n < 0.0 then
+        sign = 0x80
+        n = -n
+    end
+    local mant, expo = frexp(n)
+    if mant ~= mant then
+        return char(0xFF, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)     -- nan
+    elseif mant == huge or expo > 0x400 then
+        if sign == 0 then
+            return char(0x7F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) -- inf
+        else
+            return char(0xFF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) -- -inf
+        end
+    elseif (mant == 0.0 and expo == 0) or expo < -0x3FE then
+        return char(sign, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)     -- zero
+    else
+        expo = expo + 0x3FE
+        mant = floor((mant * 2.0 - 1.0) * ldexp(0.5, 53))
+        return char(sign + floor(expo / 0x10),
+                    (expo % 0x10) * 0x10 + floor(mant / 0x1000000000000),
+                    floor(mant / 0x10000000000) % 0x100,
+                    floor(mant / 0x100000000) % 0x100,
+                    floor(mant / 0x1000000) % 0x100,
+                    floor(mant / 0x10000) % 0x100,
+                    floor(mant / 0x100) % 0x100,
+                    mant % 0x100)
+    end
+end
+
+local coders = setmetatable({}, {
+    __index = function (t, k)
+        if k == 1 then return end   -- allows ipairs (Lua 5.3)
+        error("encode '" .. k .. "' is unimplemented")
+    end
+})
+m.coders = coders
+
+local function encode_unsigned (n, major)
+    if n <= 0x17 then
+        return char(major + n)
+    elseif n <= 0xFF then
+        return char(major + 0x18,
+                    n)
+    elseif n <= 0xFFFF then
+        return char(major + 0x19,
+                    floor(n / 0x100),
+                    n % 0x100)
+    elseif n <= 4294967295.0 then
+        return char(major + 0x1A,
+                    floor(n / 0x1000000),
+                    floor(n / 0x10000) % 0x100,
+                    floor(n / 0x100) % 0x100,
+                    n % 0x100)
+    else
+        return char(major + 0x1B,
+                    0,     -- only 53 bits from double
+                    floor(n / 0x1000000000000) % 0x100,
+                    floor(n / 0x10000000000) % 0x100,
+                    floor(n / 0x100000000) % 0x100,
+                    floor(n / 0x1000000) % 0x100,
+                    floor(n / 0x10000) % 0x100,
+                    floor(n / 0x100) % 0x100,
+                    n % 0x100)
+    end
+end
+
+coders['integer'] = function (buffer, n)
+    if n >= 0 then
+        buffer[#buffer+1] = encode_unsigned(n, 0x00)
+    else
+        buffer[#buffer+1] = encode_unsigned(-1 - n, 0x20)
+    end
+end
+
+m.OPEN_BYTE_STRING = char(0x5F)
+
+m.BYTE_STRING = function (n)
+    checkunsigned('BYTE_STRING', 1, n)
+    return encode_unsigned(n, 0x40)
+end
+
+coders['byte_string'] = function (buffer, str)
+    buffer[#buffer+1] = encode_unsigned(#str, 0x40)
+    buffer[#buffer+1] = str
+end
+
+m.OPEN_TEXT_STRING = char(0x7F)
+
+m.TEXT_STRING = function (n)
+    checkunsigned('TEXT_STRING', 1, n)
+    return encode_unsigned(n, 0x60)
+end
+
+coders['text_string'] = function (buffer, str)
+    buffer[#buffer+1] = encode_unsigned(#str, 0x60)
+    buffer[#buffer+1] = str
+end
+
+local function set_string (option)
+    if option == 'byte_string' then
+        coders['string'] = coders['byte_string']
+    elseif option == 'text_string' then
+        coders['string'] = coders['text_string']
+    elseif utf8_len and option == 'check_utf8' then
+        coders['string'] = function (buffer, str)
+            if utf8_len(str) then
+                coders['text_string'](buffer, str)
+            else
+                coders['byte_string'](buffer, str)
+            end
+        end
+    else
+        argerror('set_string', 1, "invalid option '" .. option .."'")
+    end
+end
+m.set_string = set_string
+
+m.OPEN_ARRAY = char(0x9F)
+
+m.ARRAY = function (n)
+    checkunsigned('ARRAY', 1, n)
+    return encode_unsigned(n, 0x80)
+end
+
+coders['array'] = function (buffer, tbl, n)
+    buffer[#buffer+1] = encode_unsigned(n, 0x80)
+    for i = 1, n do
+        local v = tbl[i]
+        coders[type(v)](buffer, v)
+    end
+end
+
+m.OPEN_MAP = char(0xBF)
+
+m.MAP = function (n)
+    checkunsigned('MAP', 1, n)
+    return encode_unsigned(n, 0xA0)
+end
+
+coders['map'] = function (buffer, tbl, n)
+    buffer[#buffer+1] = encode_unsigned(n, 0xA0)
+    for k, v in pairs(tbl) do
+        coders[type(k)](buffer, k)
+        coders[type(v)](buffer, v)
+    end
+end
+
+local function set_array (option)
+    if option == 'without_hole' then
+        coders['_table'] = function (buffer, tbl)
+            local is_map, n, max = false, 0, 0
+            for k in pairs(tbl) do
+                if type(k) == 'number' and k > 0 then
+                    if k > max then
+                        max = k
+                    end
+                else
+                    is_map = true
+                end
+                n = n + 1
+            end
+            if max ~= n then    -- there are holes
+                is_map = true
+            end
+            if is_map then
+                coders['map'](buffer, tbl, n)
+            else
+                coders['array'](buffer, tbl, n)
+            end
+        end
+    elseif option == 'with_hole' then
+        coders['_table'] = function (buffer, tbl)
+            local is_map, n, max = false, 0, 0
+            for k in pairs(tbl) do
+                if type(k) == 'number' and k > 0 then
+                    if k > max then
+                        max = k
+                    end
+                else
+                    is_map = true
+                end
+                n = n + 1
+            end
+            if is_map then
+                coders['map'](buffer, tbl, n)
+            else
+                coders['array'](buffer, tbl, max)
+            end
+        end
+    elseif option == 'always_as_map' then
+        coders['_table'] = function(buffer, tbl)
+            local n = 0
+            for _ in pairs(tbl) do
+                n = n + 1
+            end
+            coders['map'](buffer, tbl, n)
+        end
+    else
+        argerror('set_array', 1, "invalid option '" .. option .."'")
+    end
+end
+m.set_array = set_array
+
+coders['table'] = function (buffer, tbl)
+    coders['_table'](buffer, tbl)
+end
+
+local function TAG (n)
+    checkunsigned('TAG', 1, n)
+    return encode_unsigned(n, 0xC0)
+end
+m.TAG = TAG
+
+coders['tag'] = function (buffer, n)
+    buffer[#buffer+1] = TAG(n)
+end
+
+m.BREAK = char(0xFF)
+
+local function SIMPLE (n)
+    checkunsigned('SIMPLE', 1, n)
+    if n >= 0x100 then
+        argerror('SIMPLE', 1, "out of range")
+    end
+    if n <= 0x17 then
+        return char(0xE0 + n)
+    else
+        return char(0xF8, n)
+    end
+end
+m.SIMPLE = SIMPLE
+
+coders['simple'] = function (buffer, n)
+    buffer[#buffer+1] = SIMPLE(n)
+end
+
+coders['boolean'] = function (buffer, bool)
+    if bool then
+        buffer[#buffer+1] = char(0xF5)          -- true
+    else
+        buffer[#buffer+1] = char(0xF4)          -- false
+    end
+end
+
+coders['null'] = function (buffer)
+    buffer[#buffer+1] = char(0xF6)              -- null
+end
+
+coders['undef'] = function (buffer)
+    buffer[#buffer+1] = char(0xF7)              -- undef
+end
+
+local function set_nil (option)
+    if option == 'null' then
+        coders['nil'] = coders['null']
+    elseif option == 'undef' then
+        coders['nil'] = coders['undef']
+    else
+        argerror('set_nil', 1, "invalid option '" .. option .."'")
+    end
+end
+m.set_nil = set_nil
+
+coders['half'] = function (buffer, n)
+    buffer[#buffer+1] = char(0xF9)
+    buffer[#buffer+1] = pack_half_float(n)
+end
+
+coders['single'] = function (buffer, n)
+    buffer[#buffer+1] = char(0xFA)
+    buffer[#buffer+1] = pack_single_float(n)
+end
+
+coders['double'] = function (buffer, n)
+    buffer[#buffer+1] = char(0xFB)
+    buffer[#buffer+1] = pack_double_float(n)
+end
+
+local function set_float (option)
+    if option == 'half' then
+        coders['float'] = coders['half']
+    elseif option == 'single' then
+        coders['float'] = coders['single']
+    elseif option == 'double' then
+        coders['float'] = coders['double']
+    else
+        argerror('set_float', 1, "invalid option '" .. option .."'")
+    end
+end
+m.set_float = set_float
+
+coders['number'] = function (buffer, n)
+    if floor(n) == n and n < maxinteger and n > mininteger then
+        coders['integer'](buffer, n)
+    else
+        coders['float'](buffer, n)
+    end
+end
+
+function m.encode (data)
+    local buffer = {}
+    coders[type(data)](buffer, data)
+    return tconcat(buffer)
+end
+
+m.MAGIC = char(0xD9, 0xD9, 0xF7)        -- tag 55799
+
+local decoders  -- forward declaration
+
+local function lookahead (c)
+    local s, i, j = c.s, c.i, c.j
+    if i > j then
+        c:underflow(i)
+        s, i, j = c.s, c.i, c.j
+    end
+    return s:byte(i)
+end
+
+local function decode_cursor (c)
+    local s, i, j = c.s, c.i, c.j
+    if i > j then
+        c:underflow(i)
+        s, i, j = c.s, c.i, c.j
+    end
+    local val = s:byte(i)
+    c.i = i+1
+    return decoders[val](c, val)
+end
+m.decode_cursor = decode_cursor
+
+local function decode_uint8 (c)
+    local s, i, j = c.s, c.i, c.j
+    if i > j then
+        c:underflow(i)
+        s, i, j = c.s, c.i, c.j
+    end
+    local b1 = s:byte(i)
+    c.i = i+1
+    return b1
+end
+
+local function decode_uint16 (c)
+    local s, i, j = c.s, c.i, c.j
+    if i+1 > j then
+        c:underflow(i+1)
+        s, i, j = c.s, c.i, c.j
+    end
+    local b1, b2 = s:byte(i, i+1)
+    c.i = i+2
+    return b1 * 0x100 + b2
+end
+
+local function decode_uint32 (c)
+    local s, i, j = c.s, c.i, c.j
+    if i+3 > j then
+        c:underflow(i+3)
+        s, i, j = c.s, c.i, c.j
+    end
+    local b1, b2, b3, b4 = s:byte(i, i+3)
+    c.i = i+4
+    return ((b1 * 0x100 + b2) * 0x100 + b3) * 0x100 + b4
+end
+
+local function decode_uint64 (c)
+    local s, i, j = c.s, c.i, c.j
+    if i+7 > j then
+        c:underflow(i+7)
+        s, i, j = c.s, c.i, c.j
+    end
+    local b1, b2, b3, b4, b5, b6, b7, b8 = s:byte(i, i+7)
+    c.i = i+8
+    return ((((((b1 * 0x100 + b2) * 0x100 + b3) * 0x100 + b4) * 0x100 + b5) * 0x100 + b6) * 0x100 + b7) * 0x100 + b8
+end
+
+local function decode_string (c, n)
+    local s, i, j = c.s, c.i, c.j
+    local e = i+n-1
+    if e > j or n < 0 then
+        c:underflow(e)
+        s, i, j = c.s, c.i, c.j
+        e = i+n-1
+    end
+    c.i = i+n
+    return s:sub(i, e)
+end
+
+local function decode_stringx (c, major)
+    local t = {}
     while true do
-      nvalue,pos,t = decode(packet,pos,conv,ref)
-      if t == '__break' then
-        break;
-      end
-      if t ~= ctype then
-        throw(pos,"%s: expecting %s, got %s",ctype,ctype,t)
-      end
-      table.insert(acc,nvalue)
+        local ahead = lookahead(c)
+        if ahead == 0xFF then
+            c.i = c.i+1
+            break
+        end
+        assert(ahead >= major and ahead <= major + 0x1B, "bad major inside indefinite-length string")
+        t[#t+1] = decode_cursor(c)
     end
-    
-    return table.concat(acc),pos,ctype
-  end
+    return tconcat(t)
 end
 
-
--- ***********************************************************************
--- usage:       blob = encbintext(value,sref,stref,ctype)
--- desc:        Encode a string into a CBOR BIN or TYPE
--- input:       value (string) Lua string to encode
---              sref (table) shared references
---              stref (table) string references
---              ctype (integer) either 0x40 (BIN) or 0x60 (TEXT)
--- return:      blob (binary) encoded string
--- ***********************************************************************
-
-local function encbintext(value,sref,stref,ctype)
-  if stref then
-    if not stref[value] then
-      if #value >= mstrlen(stref) then
-        table.insert(stref,value)
-        stref[value] = #stref - 1
-      end
-    else
-      return TAG._nthstring(stref[value],sref,stref)
+local check_utf8 = utf8_len and function (s)
+    if m.strict and not utf8_len(s) then
+        error("invalid UTF-8 string")
     end
-  end
-  
-  return cbor_c.encode(ctype,#value) .. value
+    return s
+end or function (s)
+    return s
 end
 
--- ***********************************************************************
---
---                             CBOR base TYPES
---
--- Both encoding and decoding functions for CBOR base types are here.
---
--- Usage:       blob = cbor.TYPE['name'](n,sref,stref)
--- Desc:        Encode a CBOR base type
--- Input:       n (integer string table) Lua type (see notes)
---              sref (table/optional) shared reference table
---              stref (table/optional) shared string reference table
--- Return:      blob (binary) CBOR encoded value
---
--- Note:        UINT and NINT take an integer.
---
---              BIN and TEXT take a string.  TEXT will check to see if
---              the text is well formed UTF8 and throw an error if the
---              text is not valid UTF8.
---
---              ARRAY and MAP take a table of an appropriate type. No
---              checking is done of the passed in table, so a table
---              of just name/value pairs passed in to ARRAY will return
---              an empty CBOR encoded array.
---
---              TAG and SIMPLE encoding are handled elsewhere.
---
--- Usage:       value2,pos2,ctype = cbor.TYPE[n](packet,pos,info,value,conv,ref)
--- Desc:        Decode a CBOR base type
--- Input:       packet (binary) binary blob of CBOR data
---              pos (integer) byte offset in packet to start parsing from
---              info (integer) CBOR info (0 .. 31)
---              value (integer) CBOR decoded value
---              conv (table) conversion table (passed to decode())
---              ref (table) used to generate references (TAG types only)
--- Return:      value2 (any) decoded CBOR value
---              pos2 (integer) byte offset just past parsed data
---              ctype (enum/cbor) CBOR deocded type
---
--- Note:        tag_* is returned for any non-supported TAG types.  The
---              actual format is 'tag_' <integer value>---for example,
---              'tag_1234567890'.  Supported TAG types will return the
---              appropriate type name.
---
---              simple is returned for any non-supported SIMPLE types.
---              Supported simple types will return the appropriate type
---              name.
---
--- ***********************************************************************
+local function decode_array (c, n)
+    local t = {}
+    for i = 1, n do
+        t[i] = decode_cursor(c)
+    end
+    return t
+end
 
-TYPE =
-{
-  UINT = function(n)
-    return cbor_c.encode(0x00,n)
-  end,
-  
-  [0x00] = function(_,pos,info,value)
-    if info == 31 then throw(pos,"invalid data") end
-    return value,pos,'UINT'
-  end,
-  
-  -- =====================================================================
-  
-  NINT = function(n)
-    return cbor_c.encode(0x20,-1 - n)
-  end,
-  
-  [0x20] = function(_,pos,info,value)
-    if info == 31 then throw(pos,"invalid data") end
-    return -1 - value,pos,'NINT'
-  end,
-  
-  -- =====================================================================
-  
-  BIN = function(b,sref,stref)
-    if not b then
-      return "\95"
+local function decode_arrayx (c)
+    local t = {}
+    while true do
+        if lookahead(c) == 0xFF then
+            c.i = c.i+1
+            break
+        end
+        t[#t+1] = decode_cursor(c)
+    end
+    return t
+end
+
+local function decode_map (c, n)
+    local t = {}
+    for _ = 1, n do
+        local k = decode_cursor(c)
+        local val = decode_cursor(c)
+        if k == nil or k ~= k then
+            k = m.sentinel
+        end
+        if m.strict and t[k] ~= nil then
+            error("duplicated keys")
+        end
+        if k ~= nil then
+            t[k] = val
+        end
+    end
+    return t
+end
+
+local function decode_mapx (c)
+    local t = {}
+    while true do
+        if lookahead(c) == 0xFF then
+            c.i = c.i+1
+            break
+        end
+        local k = decode_cursor(c)
+        local val = decode_cursor(c)
+        if k == nil or k ~= k then
+            k = m.sentinel
+        end
+        if m.strict and t[k] ~= nil then
+            error("duplicated keys")
+        end
+        if k ~= nil then
+            t[k] = val
+        end
+    end
+    return t
+end
+
+local builders = {}
+
+function m.register_tag(tag, builder)
+    checkunsigned('register_tag', 1, tag)
+    checktype('register_tag', 2, builder, 'function')
+    builders[tag] = builder
+end
+
+local function decode_tag (c, tag)
+    if tag == 24 then   -- encoded CBOR data item
+        local sav = m.strict
+        m.strict = false
+        local i = c.i
+        decode_cursor(c)
+        m.strict = sav
+        return c.s:sub(i, c.i)
     else
-      return encbintext(b,sref,stref,0x40)
+        local val = decode_cursor(c)
+        local builder = builders[tag]
+        return builder and builder(val) or val
     end
-  end,
-  
-  [0x40] = function(packet,pos,info,value,conv,ref)
-    return decbintext(packet,pos,info,value,conv,ref,'BIN')
-  end,
-  
-  -- =====================================================================
-  
-  TEXT = function(s,sref,stref)
-    if not s then
-      return "\127"
+end
+
+local values = {}
+
+function m.register_simple(n, val)
+    checkunsigned('register_simple', 1, n)
+    values[n] = val
+end
+
+local function decode_simple(n)
+    return values[n] or n
+end
+
+local function decode_half_float (c)
+    local s, i, j = c.s, c.i, c.j
+    if i+1 > j then
+        c:underflow(i+1)
+        s, i, j = c.s, c.i, c.j
+    end
+    local b1, b2 = s:byte(i, i+1)
+    local sign = b1 > 0x7F
+    local expo = floor((b1 % 0x80) / 0x04)
+    local mant = (b1 % 0x04) * 0x100 + b2
+    if sign then
+        sign = -1
     else
-      assert(UTF8:match(s) > #s,"TEXT: not UTF-8 text")
-      return encbintext(s,sref,stref,0x60)
+        sign = 1
     end
-  end,
-  
-  [0x60] = function(packet,pos,info,value,conv,ref)
-    return decbintext(packet,pos,info,value,conv,ref,'TEXT')
-  end,
-  
-  -- =====================================================================
-  
-  ARRAY = function(array,sref,stref)
-    if not array then
-      return "\159"
-    elseif type(array) == 'number' then
-      return cbor_c.encode(0x80,array)
+    local n
+    if mant == 0 and expo == 0 then
+        n = sign * 0.0
+    elseif expo == 0x1F then
+        if mant == 0 then
+            n = sign * huge
+        else
+            n = 0.0/0.0
+        end
+    else
+        n = sign * ldexp(1.0 + mant / 0x400, expo - 0x0F)
     end
-    
-    local res = ""
-    
-    if sref then
-      if sref[array] then
-        return TAG._sharedref(sref[array],sref,stref)
-      end
-      
-      res = TAG._shareable(array)
-      table.insert(sref,array)
-      sref[array] = #sref - 1
+    c.i = i+2
+    return n
+end
+
+local function decode_single_float (c)
+    local s, i, j = c.s, c.i, c.j
+    if i+3 > j then
+        c:underflow(i+3)
+        s, i, j = c.s, c.i, c.j
     end
-    
-    res = res .. cbor_c.encode(0x80,#array)
-    for _,item in ipairs(array) do
-      res = res .. encode(item,sref,stref)
+    local b1, b2, b3, b4 = s:byte(i, i+3)
+    local sign = b1 > 0x7F
+    local expo = (b1 % 0x80) * 0x2 + floor(b2 / 0x80)
+    local mant = ((b2 % 0x80) * 0x100 + b3) * 0x100 + b4
+    if sign then
+        sign = -1
+    else
+        sign = 1
     end
-    return res
-  end,
-  
-  [0x80] = function(packet,pos,_,value,conv,ref)
-  
-    -- ---------------------------------------------------------------------
-    -- Per [1], shared references need to exist before the decoding process.
-    -- ref._sharedref.REF will be such a reference.  If it doesn't exist,
-    -- then just create a table.
-    --
-    -- [1] http://cbor.schmorp.de/value-sharing
-    -- ---------------------------------------------------------------------
-    
-    local acc = ref._sharedref.REF or {}
-    
-    for i = 1 , value do
-      local avalue,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == '__break' then return acc,npos,'ARRAY' end
-      acc[i] = avalue
-      pos    = npos
+    local n
+    if mant == 0 and expo == 0 then
+        n = sign * 0.0
+    elseif expo == 0xFF then
+        if mant == 0 then
+            n = sign * huge
+        else
+            n = 0.0/0.0
+        end
+    else
+        n = sign * ldexp(1.0 + mant / 0x800000, expo - 0x7F)
     end
-    return acc,pos,'ARRAY'
-  end,
-  
-  -- =====================================================================
-  
-  MAP = function(map,sref,stref)
-    if not map then
-      return "\191"
-    elseif type(map) == 'number' then
-      return cbor_c.encode(0xA0,map)
+    c.i = i+4
+    return n
+end
+
+local function decode_double_float (c)
+    local s, i, j = c.s, c.i, c.j
+    if i+7 > j then
+        c:underflow(i+7)
+        s, i, j = c.s, c.i, c.j
     end
-    
-    local ref = ""
-    
-    if sref then
-      if sref[map] then
-        return TAG._sharedref(sref[map],sref,stref)
-      end
-      
-      ref = TAG._shareable(map)
-      table.insert(sref,map)
-      sref[map] = #sref - 1
+    local b1, b2, b3, b4, b5, b6, b7, b8 = s:byte(i, i+7)
+    local sign = b1 > 0x7F
+    local expo = (b1 % 0x80) * 0x10 + floor(b2 / 0x10)
+    local mant = ((((((b2 % 0x10) * 0x100 + b3) * 0x100 + b4) * 0x100 + b5) * 0x100 + b6) * 0x100 + b7) * 0x100 + b8
+    if sign then
+        sign = -1
+    else
+        sign = 1
     end
-    
-    local res = ""
-    local cnt = 0
-    
-    for key,value in pairs(map) do
-      res = res .. encode(key,sref,stref)
-      res = res .. encode(value,sref,stref)
-      cnt = cnt + 1
+    local n
+    if mant == 0 and expo == 0 then
+        n = sign * 0.0
+    elseif expo == 0x7FF then
+        if mant == 0 then
+            n = sign * huge
+        else
+            n = 0.0/0.0
+        end
+    else
+        n = sign * ldexp(1.0 + mant / 4503599627370496.0, expo - 0x3FF)
     end
-    
-    return ref .. cbor_c.encode(0xA0,cnt) .. res
-  end,
-  
-  [0xA0] = function(packet,pos,_,value,conv,ref)
-    local acc = ref._sharedref.REF or {} -- see comment above
-    for _ = 1 , value do
-      local nvalue,npos,nctype = decode(packet,pos,conv,ref,true)
-      if nctype == '__break' then return acc,npos,'MAP' end
-      local vvalue,npos2 = decode(packet,npos,conv,ref)
-      acc[nvalue] = vvalue
-      pos         = npos2
-    end
-    return acc,pos,'MAP'
-  end,
-  
-  -- =====================================================================
-  
-  [0xC0] = function(packet,pos,info,value,conv,ref)
-    if info == 31 then throw(pos,"invalid data") end
-    return TAG[value](packet,pos,conv,ref)
-  end,
-  
-  -- =====================================================================
-  
-  [0xE0] = function(_,pos,info,value)
-    return SIMPLE[info](pos,value)
-  end,
+    c.i = i+8
+    return n
+end
+
+local direct_small = {
+    [0x00] = function (c, val) return val end,
+    [0x20] = function (c, val) return 0x1F - val end,
+    [0x40] = function (c, val) return decode_string(c, val - 0x40) end,
+    [0x60] = function (c, val) return check_utf8(decode_string(c, val - 0x60)) end,
+    [0x80] = function (c, val) return decode_array(c, val - 0x80) end,
+    [0xA0] = function (c, val) return decode_map(c, val - 0xA0) end,
+    [0xC0] = decode_tag,
+    [0xE0] = function (c, val) return decode_simple(val - 0xE0) end,
 }
-
--- ***********************************************************************
---
---                             CBOR TAG values
---
--- Encoding and decoding of CBOR TAG types are here.
---
--- Usage:       blob = cbor.TAG['name'](value,sref,stref)
--- Desc:        Encode a CBOR tagged value
--- Input:       value (any) any Lua type
---              sref (table/optional) shared reference table
---              stref (table/optional) shared string reference table
--- Return:      blob (binary) CBOR encoded tagged value
---
--- Note:        Some tags only support a subset of Lua types.
---
--- Usage:       value,pos2,ctype = cbor.TAG[n](packet,pos,conv,ref)
--- Desc:        Decode a CBOR tagged value
--- Input:       packet (binary) binary blob of CBOR tagged data
---              pos (integer) byte offset into packet
---              conv (table) conversion routines (passed to decode())
---              ref (table) reference table
--- Return:      value (any) decoded CBOR tagged value
---              pos2 (integer) byte offset just past parsed data
---              ctype (enum/cbor) CBOR type of value
---
--- ***********************************************************************
-
-TAG = setmetatable(
-  {
-    _datetime = function(value)
-      return cbor_c.encode(0xC0,0) .. TYPE.TEXT(value)
-    end,
-    
-    [0] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'TEXT' then
-        return value,npos,'_datetime'
-      else
-        throw(pos,"_datetime: wanted TEXT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _epoch = function(value,sref,stref)
-      assert(type(value) == 'number',"_epoch expects a number")
-      return cbor_c.encode(0xC0,1) .. encode(value,sref,stref)
-    end,
-    
-    [1] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if isnumber(ctype) then
-        return value,npos,'_epoch'
-      else
-        throw(pos,"_epoch: wanted number, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _pbignum = function(value,sref,stref)
-      return cbor_c.encode(0xC0,2) .. TYPE.BIN(value,sref,stref)
-    end,
-    
-    [2] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'BIN' then
-        return value,npos,'_pbignum'
-      else
-        throw(pos,"_pbignum: wanted BIN, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _nbignum = function(value,sref,stref)
-      return cbor_c.encode(0xC0,3) .. TYPE.BIN(value,sref,stref)
-    end,
-    
-    [3] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'BIN' then
-        return value,npos,'_nbignum'
-      else
-        throw(pos,"_nbignum: wanted BIN, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _decimalfraction = function(value,sref,stref)
-      assert(type(value)    == 'table', "_decimalfractoin expects an array")
-      assert(#value         == 2,       "_decimalfraction expects a two item array")
-      assert(math.type(value[1]) == 'integer',"_decimalfraction expects integer as first element")
-      assert(math.type(value[2]) == 'integer',"_decimalfraction expects integer as second element")
-      return cbor_c.encode(0xC0,4) .. TYPE.ARRAY(value,sref,stref)
-    end,
-    
-    [4] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      
-      if ctype ~= 'ARRAY' then
-        throw(pos,"_decimalfraction: wanted ARRAY, got %s",ctype)
-      end
-      
-      if #value ~= 2 then
-        throw(pos,"_decimalfraction: wanted ARRAY[2], got ARRAY[%d]",#value)
-      end
-      
-      if math.type(value[1]) ~= 'integer' then
-        throw(pos,"_decimalfraction: wanted integer for exp, got %s",type(value[1]))
-      end
-      
-      if math.type(value[2]) ~= 'integer' then
-        throw(pos,"_decimalfraction: wanted integer for mantissa, got %s",type(value[2]))
-      end
-      
-      return value,npos,'_decimalfraction'
-    end,
-    
-    -- =====================================================================
-    
-    _bigfloat = function(value,sref,stref)
-      assert(type(value)         == 'table',  "_bigfloat expects an array")
-      assert(#value              == 2,        "_bigfloat expects a two item array")
-      assert(math.type(value[1]) == 'integer',"_bigfloat expects an integer as first element")
-      assert(math.type(value[2]) == 'integer',"_bigfloat expects an integer as second element")
-      return cbor_c.encode(0xC0,5) .. TYPE.ARRAY(value,sref,stref)
-    end,
-    
-    [5] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      
-      if ctype ~= 'ARRAY' then
-        throw(pos,"_bigfloat: wanted ARRAY, got %s",ctype)
-      end
-      
-      if #value ~= 2 then
-        throw(pos,"_bigfloat: wanted ARRAY[2], got ARRAY[%s]",value)
-      end
-      
-      if type(value[1]) ~= 'number' then
-        throw(pos,"_bigfloat: wanted number for exp, got %s",ctype)
-      end
-      
-      if math.type(value[2]) ~= 'integer' then
-        throw(pos,"_bigfloat: wanted integer for mantissa, got %s",ctype)
-      end
-      
-      return value,npos,'_bigfloat'
-    end,
-    
-    -- =====================================================================
-    
-    _tobase64url = function(value,sref,stref)
-      return cbor_c.encode(0xC0,21) .. encode(value,sref,stref)
-    end,
-    
-    [21] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_tobase64url'
-    end,
-    
-    -- =====================================================================
-    
-    _tobase64 = function(value,sref,stref)
-      return cbor_c.encode(0xC0,22) .. encode(value,sref,stref)
-    end,
-    
-    [22] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_tobase64'
-    end,
-    
-    -- =====================================================================
-    
-    _tobase16 = function(value,sref,stref)
-      return cbor_c.encode(0xC0,23) .. encode(value,sref,stref)
-    end,
-    
-    [23] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_tobase16'
-    end,
-    
-    -- =====================================================================
-    
-    _cbor = function(value,sref,stref)
-      return cbor_c.encode(0xC0,24) .. TYPE.BIN(value,sref,stref)
-    end,
-    
-    [24] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'BIN' then
-        return value,npos,'_cbor'
-      else
-        throw(pos,"_cbor: wanted BIN, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _url = function(value,sref,stref)
-      return cbor_c.encode(0xC0,32) .. TYPE.TEXT(value,sref,stref)
-    end,
-    
-    [32] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'TEXT' then
-        return value,npos,'_url'
-      else
-        throw(pos,"_url: wanted TEXT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _base64url = function(value,sref,stref)
-      return cbor_c.encode(0xC0,33) .. TYPE.TEXT(value,sref,stref)
-    end,
-    
-    [33] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'TEXT' then
-        return value,npos,'_base64url'
-      else
-        throw(pos,"_base64url: wanted TEXT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _base64 = function(value,sref,stref)
-      return cbor_c.encode(0xC0,34) .. TYPE.TEXT(value,sref,stref)
-    end,
-    
-    [34] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'TEXT' then
-        return value,npos,'_base64'
-      else
-        throw(pos,"_base64: wanted TEXT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _regex = function(value,sref,stref)
-      return cbor_c.encode(0xC0,35) .. TYPE.TEXT(value,sref,stref)
-    end,
-    
-    [35] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'TEXT' then
-        return value,npos,'_regex'
-      else
-        throw(pos,"_regex: wanted TEXT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _mime = function(value,sref,stref)
-      return cbor_c.encode(0xC0,36) .. TYPE.TEXT(value,sref,stref)
-    end,
-    
-    [36] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'TEXT' then
-        return value,npos,'_mime'
-      else
-        throw(pos,"_mime: wanted TEXT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _magic_cbor = function()
-      return cbor_c.encode(0xC0,55799)
-    end,
-    
-    [55799] = function(_,pos)
-      return '_magic_cbor',pos,'_magic_cbor'
-    end,
-    
-    -- **********************************************************
-    -- Following defined by IANA
-    -- http://www.iana.org/assignments/cbor-tags/cbor-tags.xhtml
-    -- **********************************************************
-    
-    _nthstring = function(value,sref,stref)
-      return cbor_c.encode(0xC0,25) .. encode(value,sref,stref)
-    end,
-    
-    [25] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'UINT' then
-        value = value + 1
-        if not ref._stringref[value] then
-          throw(pos,"_nthstring: invalid index %d",value - 1)
-        end
-        return ref._stringref[value].value,npos,ref._stringref[value].ctype
-      else
-        throw(pos,"_nthstring: wanted UINT, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _perlobj = function(value,sref,stref)
-      return cbor_c.encode(0xC0,26) .. TYPE.ARRAY(value,sref,stref)
-    end,
-    
-    [26] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'ARRAY' then
-        return value,npos,'_perlobj'
-      else
-        throw(pos,"_perlobj: wanted ARRAY, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _serialobj = function(value,sref,stref)
-      return cbor_c.encode(0xC0,27) .. TYPE.ARRAY(value,sref,stref)
-    end,
-    
-    [27] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'ARRAY' then
-        return value,npos,'_serialobj'
-      else
-        throw(pos,"_serialobj: wanted ARRAY, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    -- To cut down on the silliness, not all types are shareable, only
-    -- ARRAYs and MAPs will be supported.  TEXT and BIN have their own
-    -- reference system; sharing UINT, NINT or SIMPLE just doesn't make
-    -- sense, and TAGs aren't shareable either.  So ARRAY and MAP it is!
-    -- =====================================================================
-    
-    _shareable = function(value)
-      assert(type(value) == 'table',"_shareable: expects a table")
-      return cbor_c.encode(0xC0,28)
-    end,
-    
-    [28] = function(packet,pos,conv,ref)
-      ref._sharedref.REF = {}
-      table.insert(ref._sharedref,{ value = ref._sharedref.REF })
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'ARRAY' or ctype == 'MAP' then
-        ref._sharedref[#ref._sharedref].ctype = ctype
-        return value,npos,ctype
-      else
-        throw(pos,"_shareable: wanted ARRAY or MAP, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _sharedref = function(value,sref,stref)
-      return cbor_c.encode(0xC0,29) .. encode(value,sref,stref)
-    end,
-    
-    [29] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'UINT' then
-        value = value + 1
-        if not ref._sharedref[value] then
-          throw(pos,"_sharedref: invalid index %d",value - 1)
-        end
-        return ref._sharedref[value].value,npos,ref._sharedref[value].ctype
-      else
-        throw(pos,"_sharedref: wanted ARRAY or MAP, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _rational = function(value,sref,stref)
-      -- -----------------------------------------------------------------
-      -- Per spec [1], the first value must be an integer (positive or
-      -- negative) and the second value must be a positive integer greater
-      -- than 0.  Since I'm don't know the format for bignums, there's
-      -- little error checking if those are in use.  That's the way things
-      -- go.
-      --
-      -- The encoding phase is done by hand for this.  Here we go ...
-      -- -----------------------------------------------------------------
-      
-      assert(type(value) == 'table',"_rational: expecting a table")
-      assert(#value == 2,"_rational: expecting a table of two values")
-      assert(math.type(value[1]) == 'integer' or type(value[1] == 'string'),"_rational: bad numerator")
-      assert(
-              math.type(value[2]) == 'integer' and value[2] > 0
-              or type(value[2]) == 'string',
-              "_rational: bad denominator"
-            )
-            
-      local res = cbor_c.encode(0xC0,30) .. cbor_c.encode(0x80,2)
-      
-      if math.type(value[1]) == 'integer' then
-        res = res .. __ENCODE_MAP.number(value[1],sref,stref)
-      else
-        res = res .. TYPE.BIN(value[1],sref,stref)
-      end
-      
-      if math.type(value[2]) == 'integer' then
-        res = res .. TYPE.UINT(value[2],sref,stref)
-      else
-        res = res .. TYPE.BIN(value[2],sref,stref)
-      end
-      
-      return res
-    end,
-    
-    [30] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      
-      if ctype ~= 'ARRAY' then
-        throw(pos,"_rational wanted ARRAY, got %s",ctype)
-      end
-      
-      if #value ~= 2 then
-        throw(pos,"_rational: wanted ARRAY[2], got ARRAY[%d]",#value)
-      end
-      
-      if math.type(value[1]) ~= 'integer' and type(value[1]) ~= 'string' then
-        throw(pos,"_rationa;: wanted integer or bignum for numerator, got %s",type(value[1]))
-      end
-      
-      if math.type(value[2]) ~= 'integer' and type(value[2]) ~= 'string' then
-        throw(pos,"_rational: wanted integer or bignum for demoninator, got %s",type(value[2]))
-      end
-      
-      if math.type(value[2]) == 'integer' and value[2] < 1 then
-        throw(pos,"_rational: wanted >1 for demoninator")
-      end
-      
-      return value,npos,'_rational'
-    end,
-    
-    -- =====================================================================
-    
-    _uuid = function(value,sref,stref)
-      assert(type(value) == 'string',"_uuid: expecting a string")
-      assert(#value == 16,"_uuid: expecting a binary string of 16 bytes")
-      return cbor_c.encode(0xC0,37) .. TYPE.BIN(value,sref,stref)
-    end,
-    
-    [37] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype == 'BIN' then
-        if #value ~= 16 then
-          throw(pos,"_uuid: invalid data for UUID")
-        end
-        return value,npos,'_uuid'
-      else
-        throw(pos,"_uuid: wanted BIN, got %s",ctype)
-      end
-    end,
-    
-    -- =====================================================================
-    
-    _language = function(value,sref,stref)
-      assert(type(value) == 'table',"_language: expecting a table")
-      assert(#value == 2,"_language: expecting a table of two values")
-      assert(type(value[1]) == 'string',"_language: expeting a string")
-      assert(type(value[2]) == 'string',"_language: expeting a string")
-      
-      return cbor_c.encode(0xC0,38) .. TYPE.ARRAY(value,sref,stref)
-    end,
-    
-    [38] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      if ctype ~= 'ARRAY' then
-        throw(pos,"_language: wanted ARRAY, got %s",ctype)
-      end
-      
-      if #value ~= 2 then
-        throw(pos,"_language: wanted ARRAY(2), got ARRAY(%d)",#value)
-      end
-      
-      if type(value[1]) ~= 'string' then
-        throw(pos,"_langauge: wanted TEXT for language specifier")
-      end
-      
-      if type(value[2]) ~= 'string' then
-        throw(pos,"_language: wanted TEXT for text");
-      end
-      
-      return value,npos,'_language'
-    end,
-    
-    -- =====================================================================
-    
-    _id = function(value,sref,stref)
-      return cbor_c.encode(0xC0,39) .. encode(value,sref,stref)
-    end,
-    
-    [39] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_id'
-    end,
-    
-    -- =====================================================================
-    -- _stringref is like _magic_cbor, it stands for itself and just
-    -- indicates that we're using string references for the next object.
-    -- I'm doing this because this also have to interact with _sharedref.
-    -- =====================================================================
-    
-    _stringref = function(_,_,stref)
-      stref.SEEN = true
-      return cbor_c.encode(0xC0,256)
-    end,
-    
-    [256] = function(packet,pos,conv,ref)
-      local prev = ref._stringref
-      ref._stringref = {}
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      ref._stringref = prev
-      return value,npos,ctype
-    end,
-    
-    -- =====================================================================
-    
-    _bmime = function(value,sref,stref)
-      return cbor_c.encode(0xC0,257) .. TYPE.BIN(value,sref,stref)
-    end,
-    
-    [257] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_bmime'
-    end,
-    
-    -- =====================================================================
-    
-    _ipaddress = function(value,sref,stref)
-      assert(type(value) == 'string',"_ipaddress expects a string")
-      assert(#value == 4 or #value == 16 or #value == 6,"_ipaddress wrong length")
-      return cbor_c.encode(0xC0,260) .. TYPE.BIN(value,sref,stref)
-    end,
-    
-    [260] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      
-      if ctype ~= 'BIN' then
-        throw(pos,"_ipaddress: wanted BIN, got %s",ctype)
-      end
-      
-      if #value ~= 4 and #value ~= 16 and #value ~= 6 then
-        throw(pos,"_ipaddress: wrong size address: %d",#value)
-      end
-      
-      return value,npos,'_ipaddress'
-    end,
-    
-    -- =====================================================================
-    
-    _decimalfractionexp = function(value,sref,stref)
-      assert(type(value) == 'table',"__decimalfractionexp expects an array")
-      assert(#value == 2,"_decimalfractionexp expects a two item array")
-      assert(type(value[1]) == 'string' or math.type(value[1]) == 'integer')
-      assert(math.type(value[2]) == 'integer')
-      return cbor_c.encode(0xC0,264) .. TYPE.ARRAY(value,sref,stref)
-    end,
-    
-    [264] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      
-      if ctype ~= 'ARRAY' then
-        throw(pos,"_decimalfractionexp: wanted ARRAY, got %s",ctype)
-      end
-      
-      if #value ~= 2 then
-        throw(pos,"_decimalfractionexp: wanted ARRAY(2), got ARRAY(%d)",#value)
-      end
-      
-      if type(value[1]) ~= 'string' and math.type(value[1]) ~= 'integer' then
-        throw(pos,"_decimalfractionexp: wanted integer or bignum for exp, got %s",type(value))
-      end
-      
-      if math.type(value[2]) ~= 'integer' then
-        throw(pos,"_decimalfractionexp: wanted integer or mantissa, got %s",type(value))
-      end
-      
-      return value,npos,'_decimalfractionexp'
-    end,
-    
-    -- =====================================================================
-    
-    _bigfloatexp = function(value,sref,stref)
-      assert(type(value) == 'table',"__bigfloatexp expects an array")
-      assert(#value == 2,"_bigfloatexp expects a two item array")
-      assert(type(value[1]) == 'string' or math.type(value[1]) == 'integer')
-      assert(math.type(value[2]) == 'integer')
-      return cbor_c.encode(0xC0,265) .. TYPE.ARRAY(value,sref,stref)
-      
-    end,
-    
-    [265] = function(packet,pos,conv,ref)
-      local value,npos,ctype = decode(packet,pos,conv,ref)
-      
-      if ctype ~= 'ARRAY' then
-        throw(pos,"_bigfloatexp: wanted ARRAY, got %s",ctype)
-      end
-      
-      if #value ~= 2 then
-        throw(pos,"_bigfloatexp: wanted ARRAY(2), got ARRAY(%d)",#value)
-      end
-      
-      if type(value[1]) ~= 'string' and math.type(value[1]) ~= 'integer' then
-        throw(pos,"_bigfloatexp: wanted integer or bignum for exp, got %s",type(value))
-      end
-      
-      if math.type(value[2]) ~= 'integer' then
-        throw(pos,"_bigfloatexp: wanted integer or mantissa, got %s",type(value))
-      end
-      
-      return value,npos,'_bigfloatexp'
-    end,
-    
-    -- =====================================================================
-    
-    _indirection = function(value,sref,stref)
-      return cbor_c.encode(0xC0,22098) .. encode(value,sref,stref)
-    end,
-    
-    [22098] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_indirection'
-    end,
-    
-    -- =====================================================================
-    
-    _rains = function(value,sref,stref)
-      return cbor_c.encode(0xC0,15309736) .. TYPE.MAP(value,sref,stref)
-    end,
-    
-    [15309736] = function(packet,pos,conv,ref)
-      local value,npos = decode(packet,pos,conv,ref)
-      return value,npos,'_rains'
-    end,
-  },
-  {
-    __index = function(_,key)
-      if type(key) == 'number' then
-        return function(packet,pos,conv,ref)
-          local value,npos = decode(packet,pos,conv,ref)
-          return value,npos,string.format('TAG_%d',key)
-        end
-        
-      elseif type(key) == 'string' then
-        return function(value)
-          return cbor_c.encode(0xC0,tonumber(key)) .. encode(value)
-        end
-      end
-    end
-  }
-)
-
--- ***********************************************************************
---
---                         CBOR SIMPLE data types
---
--- Encoding and decoding of CBOR simple types are here.
---
--- Usage:       blob = cbor.SIMPLE['name'](n)
--- Desc:        Encode a CBOR simple type
--- Input:       n (number/optional) floating point number to encode (see notes)
--- Return:      blob (binary) CBOR encoded simple type
---
--- Note:        Some functions ignore the passed in parameter.
---
---              WARNING! The functions that do not ignore the parameter may
---              throw an error if floating point precision will be lost
---              during the encoding.  Please be aware of what you are doing
---              when calling SIMPLE.half(), SIMPLE.float() or
---              SIMPLE.double().
---
--- Usage:       value2,pos,ctype = cbor.SIMPLE[n](pos,value)
--- Desc:        Decode a CBOR simple type
--- Input:       pos (integer) byte offset in packet
---              value (number/optional) floating point number
--- Return:      value2 (any) decoded value as Lua value
---              pos (integer) original pos passed in (see notes)
---              ctype (enum/cbor) CBOR type of value
---
--- Note:        The pos parameter is passed in to avoid special cases in
---              the code and to conform to all other decoding routines.
---
--- ***********************************************************************
-
-SIMPLE = setmetatable(
-  {
-    [20] = function(pos)       return false    ,pos,'false'     end,
-    [21] = function(pos)       return true     ,pos,'true'      end,
-    [22] = function(pos)       return null     ,pos,'null'      end,
-    [23] = function(pos)       return undefined,pos,'undefined' end,
-    [25] = function(pos,value) return value    ,pos,'half'      end,
-    [26] = function(pos,value) return value    ,pos,'single'    end,
-    [27] = function(pos,value) return value    ,pos,'double'    end,
-    [31] = function(pos)       return false    ,pos,'__break'   end,
-    
-    ['false'] = function()  return "\244" end,
-    ['true']  = function()  return "\245" end,
-    null      = function()  return "\246" end,
-    undefined = function()  return "\247" end,
-    half      = function(h) return cbor_c.encode(0xE0,25,h) end,
-    single    = function(s) return cbor_c.encode(0xE0,26,s) end,
-    double    = function(d) return cbor_c.encode(0xE0,27,d) end,
-    __break   = function()  return "\255" end,
-  },
-  {
-    __index = function(_,key)
-      if type(key) == 'number' then
-        return function(pos,value)
-          return value,pos,'SIMPLE'
-        end
-        
-      elseif type(key) == 'string' then
-        return function()
-          return cbor_c.encode(0xE0,tonumber(key))
-        end
-      end
-    end
-  }
-)
-
--- ***********************************************************************
--- Usage:       value,pos2,ctype = cbor.decode(packet[,pos][,conv][,ref][,iskey])
--- Desc:        Decode CBOR encoded data
--- Input:       packet (binary) CBOR binary blob
---              pos (integer/optional) starting point for decoding
---              conv (table/optional) table of conversion routines
---              ref (table/optional) reference table (see notes)
---              iskey (boolean/optional) is a key in a MAP (see notes)
--- Return:      value (any) the decoded CBOR data
---              pos2 (integer) offset past decoded data
---              ctype (enum/cbor) CBOR type of value
---
--- Note:        The conversion table should be constructed as:
---
---              {
---                UINT      = function(v) return munge(v) end,
---                _datetime = function(v) return munge(v) end,
---                _url      = function(v) return munge(v) end,,
---              }
---
---              The keys are CBOR types (listed above).  These functions are
---              expected to convert the decoded CBOR type into a more
---              appropriate type for your code.  For instance, an _epoch can
---              be converted into a table.
---
---              Users of this function *should not* pass a reference table
---              into this routine---this is used internally to handle
---              references.  You need to know what you are doing to use this
---              parameter.  You have been warned.
---
---              The iskey is true if the value is being used as a key in a
---              map, and is passed to the conversion routine; this too,
---              is an internal use only variable and you need to know what
---              you are doing to use this.  You have been warned.
---
---              This function can throw an error.  The returned error object
---              MAY BE a table, in which case it has the format:
---
---              {
---                msg = "Error text",
---                pos = 13 -- position in binary object of error
---              }
---
--- ***********************************************************************
-
-function decode(packet,pos,conv,ref,iskey)
-  pos  = pos  or 1
-  conv = conv or {}
-  ref  = ref  or { _stringref = {} , _sharedref = {} }
-  
-  local ctype,info,value,npos = cbor_c.decode(packet,pos)
-  local value2,npos2,ctype2 = TYPE[ctype](packet,npos,info,value,conv,ref)
-  
-  if conv[ctype2] then
-    value2 = conv[ctype2](value2,iskey)
-  end
-  
-  return value2,npos2,ctype2
-end
-
--- ***********************************************************************
--- Usage:       value,pos2,ctype[,err] = cbor.pdecode(packet[,pos][,conv][,ref])
--- Desc:        Protected call to cbor.decode(), which will return an error
--- Input:       packet (binary) CBOR binary blob
---              pos (integer/optional) starting point for decoding
---              conv (table/optional) table of conversion routines (see cbor.decode())
---              ref (table/optional) reference table (see cbor.decode())
--- Return:      value (any) the decoded CBOR data, nil on error
---              pos2 (integer) offset past decoded data; if error, position of error
---              ctype (enum/cbor) CBOR type
---              err (string/optional) error message (if any)
--- ***********************************************************************
-
-function pdecode(packet,pos,conv,ref)
-  local okay,value,npos,ctype = pcall(decode,packet,pos,conv,ref)
-  if okay then
-    return value,npos,ctype
-  else
-    return nil,value.pos,'__error',value.msg
-  end
-end
-
--- ***********************************************************************
-
-local function generic(value,sref,stref)
-  local mt = getmetatable(value)
-  if not mt then
-    if type(value) == 'table' then
-      if #value > 0 then
-        return TYPE.ARRAY(value,sref,stref)
-      else
-        return TYPE.MAP(value,sref,stref)
-      end
-    else
-      error(string.format("Cannot encode %s",type(value)))
-    end
-  end
-  
-  if mt.__tocbor then
-    return mt.__tocbor(value,sref,stref)
-    
-  elseif mt.__len then
-    return TYPE.ARRAY(value,sref,stref)
-    
-  elseif LUA_VERSION == "Lua 5.2" and mt.__ipairs then
-    return TYPE.ARRAY(value,sref,stref)
-    
-  elseif LUA_VERSION >= "Lua 5.2" and mt.__pairs then
-    return TYPE.MAP(value,sref,stref)
-    
-  else
-    error(string.format("Cannot encode %s",type(value)))
-  end
-end
-
--- ***********************************************************************
---
---                              __ENCODE_MAP
---
--- A table of functions to map Lua values to CBOR encoded values.  nil,
--- boolean, number and string are handled directly (if a Lua string is valid
--- UTF8, then it's encoded as a CBOR TEXT.
---
--- For the other four types, only tables are directly supported without
--- metatable support.  If a metatable does exist, if the method '__tocbor'
--- is defined, that function is called and the results returned.  If '__len'
--- is defined, then it is mapped as a CBOR ARRAY.  For Lua 5.2, if
--- '__ipairs' is defined, then it too, is mapped as a CBOR ARRAY.  If Lua
--- 5.2 or higher and '__pairs' is defined, then it's mapped as a CBOR MAP.
---
--- Otherwise, an error is thrown.
---
--- Usage:       blob = cbor.__ENCODE_MAP[luatype](value,sref,stref)
--- Desc:        Encode a Lua type into a CBOR type
--- Input:       value (any) a Lua value who's type matches luatype.
---              sref (table/optional) shared reference table
---              stref (table/optional) shared string reference table
--- Return:      blob (binary) CBOR encoded data
---
--- ***********************************************************************
-
-__ENCODE_MAP =
-{
-  ['nil'] = SIMPLE.null,
-  
-  ['boolean'] = function(b)
-    if b then
-      return SIMPLE['true']()
-    else
-      return SIMPLE['false']()
-    end
-  end,
-  
-  ['number'] = function(value)
-    if math.type(value) == 'integer' then
-      if value < 0 then
-        return TYPE.NINT(value)
-      else
-        return TYPE.UINT(value)
-      end
-    else
-      return cbor_c.encode(0xE0,nil,value)
-    end
-  end,
-  
-  ['string'] = function(value,sref,stref)
-    if UTF8:match(value) > #value then
-      return TYPE.TEXT(value,sref,stref)
-    else
-      return TYPE.BIN(value,sref,stref)
-    end
-  end,
-  
-  ['table']    = generic,
-  ['function'] = generic,
-  ['userdata'] = generic,
-  ['thread']   = generic,
+decoders = {
+    -- 0x00..0x17   unsigned integer
+    [0x18] = decode_uint8,
+    [0x19] = decode_uint16,
+    [0x1A] = decode_uint32,
+    [0x1B] = decode_uint64,
+    -- 0x20..0x37   negative integer
+    [0x38] = function (c) return -1 - decode_uint8(c) end,
+    [0x39] = function (c) return -1 - decode_uint16(c) end,
+    [0x3A] = function (c) return -1 - decode_uint32(c) end,
+    [0x3B] = function (c) return -1 - decode_uint64(c) end,
+    -- 0x40..0x57   byte string
+    [0x58] = function (c) return decode_string(c, decode_uint8(c)) end,
+    [0x59] = function (c) return decode_string(c, decode_uint16(c)) end,
+    [0x5A] = function (c) return decode_string(c, decode_uint32(c)) end,
+    [0x5B] = function (c) return decode_string(c, decode_uint64(c)) end,
+    [0x5F] = function (c) return decode_stringx(c, 0x40) end,
+    -- 0x60..0x77   text string
+    [0x78] = function (c) return check_utf8(decode_string(c, decode_uint8(c))) end,
+    [0x79] = function (c) return check_utf8(decode_string(c, decode_uint16(c))) end,
+    [0x7A] = function (c) return check_utf8(decode_string(c, decode_uint32(c))) end,
+    [0x7B] = function (c) return check_utf8(decode_string(c, decode_uint64(c))) end,
+    [0x7F] = function (c) return check_utf8(decode_stringx(c, 0x60)) end,
+    -- 0x80..0x97   array
+    [0x98] = function (c) return decode_array(c, decode_uint8(c)) end,
+    [0x99] = function (c) return decode_array(c, decode_uint16(c)) end,
+    [0x9A] = function (c) return decode_array(c, decode_uint32(c)) end,
+    [0x9B] = function (c) return decode_array(c, decode_uint64(c)) end,
+    [0x9F] = decode_arrayx,
+    -- 0xA0..0xB7   map
+    [0xB8] = function (c) return decode_map(c, decode_uint8(c)) end,
+    [0xB9] = function (c) return decode_map(c, decode_uint16(c)) end,
+    [0xBA] = function (c) return decode_map(c, decode_uint32(c)) end,
+    [0xBB] = function (c) return decode_map(c, decode_uint64(c)) end,
+    [0xBF] = decode_mapx,
+    -- 0xC0..0xD7   tag
+    [0xD8] = function (c) return decode_tag(c, decode_uint8(c)) end,
+    [0xD9] = function (c) return decode_tag(c, decode_uint16(c)) end,
+    [0xDA] = function (c) return decode_tag(c, decode_uint32(c)) end,
+    [0xDB] = function (c) return decode_tag(c, decode_uint64(c)) end,
+    -- 0xE0..0xF3   value
+    [0xF4] = function () return false end,
+    [0xF5] = function () return true end,
+    [0xF6] = function () return nil end,
+    [0xF7] = function () return nil end,
+    [0xF8] = function (c, val) return decode_simple(decode_uint8(c)) end,
+    [0xF9] = decode_half_float,
+    [0xFA] = decode_single_float,
+    [0xFB] = decode_double_float,
+    [0xFF] = function () error("unexpected BREAK") end,
 }
+for k, v in pairs(direct_small) do
+    for i = 0, 0x17 do
+        if not decoders[k+i] then
+            decoders[k+i] = v
+        end
+    end
+end
+setmetatable(decoders, {
+    __index = function (t, k) error("decode '" .. format('%#x', k) .. "' is unimplemented") end
+})
 
--- ***********************************************************************
--- Usage:       blob = cbor.encode(value[,sref][,stref])
--- Desc:        Encode a Lua type into a CBOR type
--- Input:       value (any)
---              sref (table/optional) shared reference table
---              stref (table/optional) shared string reference table
--- Return:      blob (binary) CBOR encoded value
--- ***********************************************************************
-
-function encode(value,sref,stref)
-  if value == null then
-    return SIMPLE.null()
-  elseif value == undefined then
-    return SIMPLE.undefined()
-  end
-  
-  local res = ""
-  
-  if stref and not stref.SEEN then
-    res = TAG._stringref(nil,nil,stref)
-  end
-  
-  return res .. __ENCODE_MAP[type(value)](value,sref,stref)
+local function cursor_string (str)
+    return {
+        s = str,
+        i = 1,
+        j = #str,
+        underflow = function ()
+                        error "missing bytes"
+                    end,
+    }
 end
 
--- ***********************************************************************
--- Usage:       blob[,err] = cbor.pencode(value[,sref][,stref])
--- Desc:        Protected call to encode a CBOR type
--- Input:       value (any)
---              sref (table/optional) shared reference table
---              stref (table/optional) shared string reference table
--- Return:      blob (binary) CBOR encoded value, nil on error
---              err (string/optional) error message
--- ***********************************************************************
-
-function pencode(value,sref,stref)
-  local okay,value2 = pcall(encode,value,sref,stref)
-  if okay then
-    return value2
-  else
-    return nil,value2
-  end
+local function cursor_loader (ld)
+    return {
+        s = '',
+        i = 1,
+        j = 0,
+        underflow = function (self, e)
+                        self.s = self.s:sub(self.i)
+                        e = e - self.i + 1
+                        self.i = 1
+                        self.j = 0
+                        while e > self.j do
+                            local chunk = ld()
+                            if not chunk then
+                                error "missing bytes"
+                            end
+                            self.s = self.s .. chunk
+                            self.j = #self.s
+                        end
+                    end,
+    }
 end
 
--- ***********************************************************************
-
-if LUA_VERSION >= "Lua 5.2" then
-  return _ENV
+function m.decode (s)
+    checktype('decode', 1, s, 'string')
+    local cursor = cursor_string(s)
+    local data = decode_cursor(cursor)
+    if cursor.i <= cursor.j then
+        error "extra bytes"
+    end
+    return data
 end
+
+function m.decoder (src)
+    if type(src) == 'string' then
+        local cursor = cursor_string(src)
+        return function ()
+            if cursor.i <= cursor.j then
+                return cursor.i, decode_cursor(cursor)
+            end
+        end
+    elseif type(src) == 'function' then
+        local cursor = cursor_loader(src)
+        return function ()
+            if cursor.i > cursor.j then
+                pcall(cursor.underflow, cursor, cursor.i)
+            end
+            if cursor.i <= cursor.j then
+                return true, decode_cursor(cursor)
+            end
+        end
+    else
+        argerror('decoder', 1, "string or function expected, got " .. type(src))
+    end
+end
+
+set_nil'undef'
+set_string'text_string'
+set_array'without_hole'
+m.strict = true
+if SIZEOF_NUMBER == 4 then
+    maxinteger = 16777215
+    mininteger = -maxinteger
+    for i = 0x1B, 0xFB, 0x20 do
+        decoders[i] = nil       -- 64 bits
+    end
+    m.small_lua = true
+    set_float'single'
+else
+    maxinteger = 9007199254740991
+    mininteger = -maxinteger
+    set_float'double'
+    if SIZEOF_NUMBER > 8 then
+        m.long_double = true
+    end
+end
+
+m._VERSION = '0.2.2'
+m._DESCRIPTION = "lua-ConciseSerialization : a pure Lua implementation of CBOR / RFC7049"
+m._COPYRIGHT = "Copyright (c) 2016-2019 Francois Perrad"
+return m
+--
+-- This library is licensed under the terms of the MIT/X11 license,
+-- like Lua itself.
+--

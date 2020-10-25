@@ -64,8 +64,9 @@ local function parseAuthData(buffer)
 	authData.rpIdHash = util.slice(buffer, 1, 33)
 	authData.flags = buffer[33]
 
-	print("Size of buffer: "..#buffer)
-	print(type(buffer))
+	--print("Size of buffer: "..#buffer)
+	--print(type(buffer))
+
 	--(authData[33] << 24) | (authData[34] << 16) | (authData[35] << 8) | (authData[36]);
 	authData.signCount = bor( lshift(buffer[34], 24), bor( lshift(buffer[35], 16), bor( lshift(buffer[36], 8), buffer[37] ) ) )
 
